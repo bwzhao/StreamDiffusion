@@ -261,6 +261,13 @@ class StreamDiffusion:
         )
         self.prompt_embeds = encoder_output[0].repeat(self.batch_size, 1, 1)
 
+    @torch.no_grad()
+    def update_init_noise(self) -> None:
+        self.init_noise = torch.randn(
+            (self.batch_size, 4, self.latent_height, self.latent_width),
+            generator=self.generator,
+        ).to(device=self.device, dtype=self.dtype)
+
     def add_noise(
         self,
         original_samples: torch.Tensor,
