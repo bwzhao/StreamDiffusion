@@ -5,8 +5,9 @@ import subprocess
 import sys
 from typing import Dict, Optional
 
+import torch
+from diffusers.utils import is_torch_version
 from packaging.version import Version
-
 
 python = sys.executable
 index_url = os.environ.get("INDEX_URL", "")
@@ -30,7 +31,7 @@ def is_installed(package: str) -> bool:
 
 def run_python(command: str, env: Dict[str, str] = None) -> str:
     run_kwargs = {
-        "args": f"\"{python}\" {command}",
+        "args": f'"{python}" {command}',
         "shell": True,
         "env": os.environ if env is None else env,
         "encoding": "utf8",

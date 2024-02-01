@@ -2,16 +2,25 @@ import dearpygui.dearpygui as dpg
 import numpy as np
 import PIL.Image
 import torch
-from diffusers import AutoencoderTiny, StableDiffusionPipeline
-from diffusers.utils import load_image
+from diffusers import AutoPipelineForImage2Image, LCMScheduler, StableDiffusionPipeline
+from diffusers.utils import load_image, make_image_grid
 from src.streamdiffusion import StreamDiffusion
 from src.streamdiffusion.image_utils import postprocess_image
 
 
-def generate_image(stream, input_image, texture_tag):
-    stream.update_init_noise()
-    x_output = stream(input_image)
-    image = postprocess_image(x_output, output_type="pil")[0]
+def generate_image(pipe, prompt, init_image, texture_tag):
+    # stream.update_init_noise()
+    # x_output = stream(input_image)
+    generator = torch.manual_seed(-1)
+    image = pipe(
+        prompt,
+        image=init_image,
+        num_inference_steps=4,
+        guidance_scale=1,
+        strength=0.6,
+        generator=generator,
+    ).images[0]
+
     image.putalpha(255)
     dpg.set_value(texture_tag, np.asarray(image).flatten() / 255.0)
 
@@ -22,8 +31,6 @@ def main():
     texture_tag = "display_image"
     input_tag = "input_image"
 
-    text_prompt = "1 girl with dog hair, thick frame glasses"
-
     empty_data = []
     for i in range(0, height * width):
         empty_data.append(255 / 255)
@@ -32,53 +39,35 @@ def main():
         empty_data.append(255 / 255)
 
     # You can load any models using diffuser's StableDiffusionPipeline
-    pipe = StableDiffusionPipeline.from_pretrained("KBlueLeaf/kohaku-v2.1").to(
-        device=torch.device("cuda"),
-        dtype=torch.float16,
-    )
+    pipe = StableDiffusionPipeline.from_pretrained(
+        "KBlueLeaf/kohaku-v2.1",
+        safety_checker=None,
+    ).to(device=torch.device("cuda"), dtype=torch.float16)
 
-    # Wrap the pipeline in StreamDiffusion
-    stream = StreamDiffusion(
-        pipe,
-        # t_index_list=[22, 32, 45],
-        t_index_list=[22, 32, 45],
-        torch_dtype=torch.float16,
-    )
+    pipe = AutoPipelineForImage2Image.from_pipe(pipe)
+    # set scheduler
+    pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
 
-    # If the loaded model is not LCM, merge LCM
-    stream.load_lcm_lora()
-    stream.fuse_lora()
-    # Use Tiny VAE for further acceleration
-    stream.vae = AutoencoderTiny.from_pretrained("madebyollin/taesd").to(
-        device=pipe.device, dtype=pipe.dtype
-    )
-    # Enable acceleration
-    pipe.enable_xformers_memory_efficient_attention()
+    # load LCM-LoRA
+    pipe.load_lora_weights("latent-consistency/lcm-lora-sdv1-5")
 
-    prompt = "1girl with dog hair, thick frame glasses"
-    # Prepare the stream
-    stream.prepare(prompt)
+    pipe.enable_model_cpu_offload()
+
+    prompt = "1 girl with dog hair, thick frame glasses"
 
     # Prepare image
     path_input_image = "./images/inputs/input.png"
-
     init_image = load_image(path_input_image).resize((512, 512))
 
-    # Warmup >= len(t_index_list) x frame_buffer_size
-    for _ in range(4):
-        stream(init_image)
-
     dpg.create_context()
-    dpg.create_viewport(
-        title="StreamDiffusion img2img Test", width=2 * width, height=700
-    )
+    dpg.create_viewport(title="Diffusers img2img Test", width=2 * width, height=700)
     dpg.setup_dearpygui()
 
     with dpg.value_registry():
         dpg.add_string_value(
             default_value=f"Model: KBlueLeaf/kohaku-v2.1 (SD1.5) + LCM-LoRA\n"
             + "GPU: RTX3090\n"
-            + f"Prompt: {text_prompt} \n"
+            + f"Prompt: {prompt} \n"
             + f"Resolution: {width}*{height}",
             tag="prompt",
         )
@@ -132,24 +121,14 @@ def main():
 
     import time
 
-    last_time = time.time()
-    previous_image = init_image
     input_image = init_image
     while dpg.is_dearpygui_running():
-        # add noise to image
-        # input_image = np.array(previous_image)
-        # noise = np.random.normal(0, 1, (height, width, 3))
-        # input_image = np.clip(input_image + noise, 0, 255)
-        # input_image = PIL.Image.fromarray((input_image).astype(np.uint8))
-
         last_time = time.time()
-        generate_image(stream, input_image, texture_tag)
+        generate_image(pipe, prompt, input_image, texture_tag)
         generate_time = time.time() - last_time
         dpg.set_value("fps", f"Generation Time: {generate_time:.2f}s")
 
         dpg.render_dearpygui_frame()
-
-        # previous_image = input_image
 
     dpg.destroy_context()
 
