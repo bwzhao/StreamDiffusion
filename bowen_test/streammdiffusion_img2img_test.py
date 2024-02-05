@@ -48,7 +48,7 @@ def main():
     stream = StreamDiffusion(
         pipe,
         # t_index_list=[22, 32, 45],
-        t_index_list=[0, 16, 32, 45],
+        t_index_list=[],
         torch_dtype=torch.float16,
         use_denoising_batch=False,
     )
@@ -65,7 +65,7 @@ def main():
 
     prompt = "1girl with dog hair, thick frame glasses"
     # Prepare the stream
-    stream.prepare(prompt)
+    stream.prepare(prompt, num_inference_steps=50, seed=-1)
 
     # Prepare image
     path_input_image = "./images/inputs/input.png"

@@ -2,7 +2,9 @@ import dearpygui.dearpygui as dpg
 import numpy as np
 import PIL.Image
 import torch
-from diffusers import AutoPipelineForImage2Image, LCMScheduler, StableDiffusionPipeline
+from diffusers import (AutoPipelineForImage2Image, ControlNetModel,
+                       LCMScheduler, StableDiffusionPipeline,
+                       UNet2DConditionModel)
 from diffusers.utils import load_image, make_image_grid
 from src.streamdiffusion import StreamDiffusion
 from src.streamdiffusion.image_utils import postprocess_image

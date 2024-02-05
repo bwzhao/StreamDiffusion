@@ -8,8 +8,9 @@ from diffusers import LCMScheduler, StableDiffusionPipeline
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.models import ControlNetModel
 from diffusers.pipelines.controlnet.multicontrolnet import MultiControlNetModel
-from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img import \
-    retrieve_latents
+from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img import (
+    retrieve_latents,
+)
 from diffusers.utils.torch_utils import is_compiled_module
 
 from streamdiffusion.image_filter import SimilarImageFilter
@@ -94,14 +95,13 @@ class StreamDiffusionControlNetPipeline:
 
         self.inference_time_ema = 0
 
+        # Controlnet
         if isinstance(controlnet, (list, tuple)):
             controlnet = MultiControlNetModel(controlnet)
-        # TODO: CHECK vae_scale_factor
-        self.vae_scale_factor = 2 ** (
-            len(self.vae.config.block_out_channels) - 1
-        )  # pipe.vae_scale_factor
+        self.controlnet = controlnet
+        # self.vae_scale_factor = pipe.vae_scale_factor
         self.control_image_processor = VaeImageProcessor(
-            vae_scale_factor=self.vae_scale_factor,
+            vae_scale_factor=pipe.vae_scale_factor,
             do_convert_rgb=True,
             do_normalize=False,
         )
@@ -371,6 +371,8 @@ class StreamDiffusionControlNetPipeline:
         self,
         x_t_latent: torch.Tensor,
         t_list: Union[torch.Tensor, list[int]],
+        control_image,
+        cond_scales,
         idx: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.guidance_scale > 1.0 and (self.cfg_type == "initialize"):
@@ -383,12 +385,12 @@ class StreamDiffusionControlNetPipeline:
             x_t_latent_plus_uc = x_t_latent
 
         down_block_res_samples, mid_block_res_sample = self.controlnet(
-            control_model_input,
-            t,
-            encoder_hidden_states=controlnet_prompt_embeds,
+            x_t_latent,
+            t_list,
+            encoder_hidden_states=self.prompt_embeds,
             controlnet_cond=control_image,
-            conditioning_scale=cond_scale,
-            guess_mode=guess_mode,
+            conditioning_scale=cond_scales,
+            guess_mode=False,
             return_dict=False,
         )
 
@@ -396,7 +398,6 @@ class StreamDiffusionControlNetPipeline:
             x_t_latent_plus_uc,
             t_list,
             encoder_hidden_states=self.prompt_embeds,
-            cross_attention_kwargs=self.cross_attention_kwargs,
             down_block_additional_residuals=down_block_res_samples,
             mid_block_additional_residual=mid_block_res_sample,
             return_dict=False,
@@ -471,7 +472,9 @@ class StreamDiffusionControlNetPipeline:
         )[0]
         return output_latent
 
-    def predict_x0_batch(self, x_t_latent: torch.Tensor) -> torch.Tensor:
+    def predict_x0_batch(
+        self, x_t_latent: torch.Tensor, control_image, cond_scales
+    ) -> torch.Tensor:
         prev_latent_batch = self.x_t_latent_buffer
 
         if self.use_denoising_batch:
@@ -523,7 +526,9 @@ class StreamDiffusionControlNetPipeline:
 
     @torch.no_grad()
     def __call__(
-        self, x: Union[torch.Tensor, PIL.Image.Image, np.ndarray] = None
+        self,
+        input_image: Union[torch.Tensor, PIL.Image.Image, np.ndarray] = None,
+        control_image: Union[torch.Tensor, PIL.Image.Image, np.ndarray] = None,
     ) -> torch.Tensor:
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
@@ -536,9 +541,6 @@ class StreamDiffusionControlNetPipeline:
         batch_size = 1
         num_images_per_prompt = 1
         guess_mode = False
-        control_image = torch.randn(
-            (1, 3, self.height, self.width), device=self.device, dtype=self.dtype
-        )
 
         controlnet = (
             self.controlnet._orig_mod
@@ -575,6 +577,7 @@ class StreamDiffusionControlNetPipeline:
             controlnet_conditioning_scale = [controlnet_conditioning_scale] * len(
                 controlnet.nets
             )
+
         # 5. Prepare controlnet_conditioning_image
         if isinstance(controlnet, ControlNetModel):
             control_image = self.prepare_control_image(
@@ -610,8 +613,25 @@ class StreamDiffusionControlNetPipeline:
         else:
             assert False
 
-        # 7.1 Create tensor stating which controlnets to keep
+        if input_image is not None:
+            input_image = self.image_processor.preprocess(
+                input_image, self.height, self.width
+            ).to(device=self.device, dtype=self.dtype)
+            if self.similar_image_filter:
+                input_image = self.similar_filter(input_image)
+                if input_image is None:
+                    time.sleep(self.inference_time_ema)
+                    return self.prev_image_result
+            x_t_latent = self.encode_image(input_image)
+        else:
+            # TODO: check the dimension of x_t_latent
+            x_t_latent = torch.randn((1, 4, self.latent_height, self.latent_width)).to(
+                device=self.device, dtype=self.dtype
+            )
+
+        # Create tensor stating which controlnets to keep
         controlnet_keep = []
+        cond_scales = []
         for i in range(len(self.timesteps)):
             keeps = [
                 1.0
@@ -623,23 +643,19 @@ class StreamDiffusionControlNetPipeline:
             controlnet_keep.append(
                 keeps[0] if isinstance(controlnet, ControlNetModel) else keeps
             )
+            if isinstance(controlnet_keep[i], list):
+                cond_scale = [
+                    c * s
+                    for c, s in zip(controlnet_conditioning_scale, controlnet_keep[i])
+                ]
+            else:
+                controlnet_cond_scale = controlnet_conditioning_scale
+                if isinstance(controlnet_cond_scale, list):
+                    controlnet_cond_scale = controlnet_cond_scale[0]
+                cond_scale = controlnet_cond_scale * controlnet_keep[i]
+            cond_scales.append(cond_scale)
 
-        if x is not None:
-            x = self.image_processor.preprocess(x, self.height, self.width).to(
-                device=self.device, dtype=self.dtype
-            )
-            if self.similar_image_filter:
-                x = self.similar_filter(x)
-                if x is None:
-                    time.sleep(self.inference_time_ema)
-                    return self.prev_image_result
-            x_t_latent = self.encode_image(x)
-        else:
-            # TODO: check the dimension of x_t_latent
-            x_t_latent = torch.randn((1, 4, self.latent_height, self.latent_width)).to(
-                device=self.device, dtype=self.dtype
-            )
-        x_0_pred_out = self.predict_x0_batch(x_t_latent)
+        x_0_pred_out = self.predict_x0_batch(x_t_latent, control_image, cond_scales)
         x_output = self.decode_image(x_0_pred_out).detach().clone()
 
         self.prev_image_result = x_output
