@@ -371,8 +371,8 @@ class StreamDiffusionControlNetPipeline:
         self,
         x_t_latent: torch.Tensor,
         t_list: Union[torch.Tensor, list[int]],
-        control_image,
-        cond_scales,
+        control_image: torch.Tensor,
+        cond_scale: float,
         idx: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.guidance_scale > 1.0 and (self.cfg_type == "initialize"):
@@ -385,11 +385,11 @@ class StreamDiffusionControlNetPipeline:
             x_t_latent_plus_uc = x_t_latent
 
         down_block_res_samples, mid_block_res_sample = self.controlnet(
-            x_t_latent,
+            x_t_latent_plus_uc,
             t_list,
             encoder_hidden_states=self.prompt_embeds,
             controlnet_cond=control_image,
-            conditioning_scale=cond_scales,
+            conditioning_scale=cond_scale,
             guess_mode=False,
             return_dict=False,
         )
@@ -473,7 +473,7 @@ class StreamDiffusionControlNetPipeline:
         return output_latent
 
     def predict_x0_batch(
-        self, x_t_latent: torch.Tensor, control_image, cond_scales
+        self, x_t_latent: torch.Tensor, control_image, cond_scale
     ) -> torch.Tensor:
         prev_latent_batch = self.x_t_latent_buffer
 
@@ -484,7 +484,9 @@ class StreamDiffusionControlNetPipeline:
                 self.stock_noise = torch.cat(
                     (self.init_noise[0:1], self.stock_noise[:-1]), dim=0
                 )
-            x_0_pred_batch, model_pred = self.unet_step(x_t_latent, t_list)
+            x_0_pred_batch, model_pred = self.unet_step(
+                x_t_latent, t_list, control_image, cond_scale
+            )
 
             if self.denoising_steps_num > 1:
                 x_0_pred_out = x_0_pred_batch[-1].unsqueeze(0)
@@ -508,7 +510,9 @@ class StreamDiffusionControlNetPipeline:
                 ).repeat(
                     self.frame_bff_size,
                 )
-                x_0_pred, model_pred = self.unet_step(x_t_latent, t, idx)
+                x_0_pred, model_pred = self.unet_step(
+                    x_t_latent, t, control_image, cond_scale, idx
+                )
                 if idx < len(self.sub_timesteps_tensor) - 1:
                     if self.do_add_noise:
                         x_t_latent = self.alpha_prod_t_sqrt[
@@ -537,7 +541,7 @@ class StreamDiffusionControlNetPipeline:
         # TODO: Remove fake input
         control_guidance_start = 0.0
         control_guidance_end = 1.0
-        controlnet_conditioning_scale = 1.0
+        controlnet_conditioning_scale = 0.8
         batch_size = 1
         num_images_per_prompt = 1
         guess_mode = False
@@ -588,7 +592,7 @@ class StreamDiffusionControlNetPipeline:
                 num_images_per_prompt=num_images_per_prompt,
                 device=self.device,
                 dtype=controlnet.dtype,
-                do_classifier_free_guidance=self.do_classifier_free_guidance,
+                do_classifier_free_guidance=False,
                 guess_mode=guess_mode,
             )
         elif isinstance(controlnet, MultiControlNetModel):
@@ -631,7 +635,6 @@ class StreamDiffusionControlNetPipeline:
 
         # Create tensor stating which controlnets to keep
         controlnet_keep = []
-        cond_scales = []
         for i in range(len(self.timesteps)):
             keeps = [
                 1.0
@@ -653,9 +656,10 @@ class StreamDiffusionControlNetPipeline:
                 if isinstance(controlnet_cond_scale, list):
                     controlnet_cond_scale = controlnet_cond_scale[0]
                 cond_scale = controlnet_cond_scale * controlnet_keep[i]
-            cond_scales.append(cond_scale)
 
-        x_0_pred_out = self.predict_x0_batch(x_t_latent, control_image, cond_scales)
+        control_image = control_image.to(device=self.device, dtype=self.dtype)
+        cond_scale = controlnet_cond_scale
+        x_0_pred_out = self.predict_x0_batch(x_t_latent, control_image, cond_scale)
         x_output = self.decode_image(x_0_pred_out).detach().clone()
 
         self.prev_image_result = x_output

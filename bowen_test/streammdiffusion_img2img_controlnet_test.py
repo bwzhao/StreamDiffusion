@@ -2,20 +2,15 @@ import dearpygui.dearpygui as dpg
 import numpy as np
 import PIL.Image
 import torch
-from diffusers import (
-    AutoencoderTiny,
-    StableDiffusionControlNetImg2ImgPipeline,
-    StableDiffusionInpaintPipeline,
-    StableDiffusionPipeline,
-)
+from diffusers import AutoencoderTiny, ControlNetModel, StableDiffusionPipeline
 from diffusers.utils import load_image
-from src.streamdiffusion import StreamDiffusion
+from src.streamdiffusion import StreamDiffusionControlNetPipeline
 from src.streamdiffusion.image_utils import postprocess_image
 
 
-def generate_image(stream, input_image, texture_tag):
+def generate_image(stream, input_image, control_image, texture_tag):
     stream.update_init_noise()
-    x_output = stream(input_image)
+    x_output = stream(input_image, control_image)
     # x_output = stream.txt2img()
 
     image = postprocess_image(x_output, output_type="pil")[0]
@@ -39,15 +34,21 @@ def main():
         empty_data.append(255 / 255)
 
     # You can load any models using diffuser's StableDiffusionPipeline
-    pipe = StableDiffusionPipeline.from_pretrained("KBlueLeaf/kohaku-v2.1").to(
+    pipe = StableDiffusionPipeline.from_pretrained("Lykon/dreamshaper-7").to(
         device=torch.device("cuda"),
         dtype=torch.float16,
     )
-
+    controlnet = ControlNetModel.from_pretrained(
+        "lllyasviel/control_v11f1p_sd15_depth",
+        torch_dtype=torch.float16,
+        variant="fp16",
+        use_safetensors=True,
+    ).to(device=pipe.device, dtype=pipe.dtype)
     # Wrap the pipeline in StreamDiffusion
-    stream = StreamDiffusion(
+    stream = StreamDiffusionControlNetPipeline(
         pipe,
-        t_index_list=[22, 32, 45],
+        controlnet=controlnet,
+        t_index_list=[10, 20, 30, 40],
         # t_index_list=[],
         torch_dtype=torch.float16,
         use_denoising_batch=False,
@@ -63,18 +64,20 @@ def main():
     # Enable acceleration
     pipe.enable_xformers_memory_efficient_attention()
 
-    prompt = "1girl with dog hair, thick frame glasses"
+    prompt = "Astronauts in a jungle, cold color palette, muted colors, detailed, 8k"
     # Prepare the stream
     stream.prepare(prompt, num_inference_steps=50, seed=-1)
 
     # Prepare image
-    path_input_image = "./images/inputs/input.png"
+    path_input_image = "./images/inputs/img2img-init.png"
+    path_control_image = "./images/inputs/images_control.png"
 
     init_image = load_image(path_input_image).resize((512, 512))
+    control_image = load_image(path_control_image).resize((512, 512))
 
     # Warmup >= len(t_index_list) x frame_buffer_size
     for _ in range(4):
-        stream(init_image)
+        stream(init_image, control_image)
 
     dpg.create_context()
     dpg.create_viewport(
@@ -143,7 +146,7 @@ def main():
     input_image = init_image
     while dpg.is_dearpygui_running():
         last_time = time.time()
-        generate_image(stream, input_image, texture_tag)
+        generate_image(stream, input_image, control_image, texture_tag)
         generate_time = time.time() - last_time
         dpg.set_value("fps", f"Generation Time: {generate_time:.2f}s")
 
