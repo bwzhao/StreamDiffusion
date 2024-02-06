@@ -23,6 +23,7 @@ def main():
     width = 512
     texture_tag = "display_image"
     input_tag = "input_image"
+    control_tag = "control_image"
 
     text_prompt = "1 girl with dog hair, thick frame glasses"
 
@@ -34,7 +35,8 @@ def main():
         empty_data.append(255 / 255)
 
     # You can load any models using diffuser's StableDiffusionPipeline
-    pipe = StableDiffusionPipeline.from_pretrained("Lykon/dreamshaper-7").to(
+    base_model = "Lykon/dreamshaper-7"
+    pipe = StableDiffusionPipeline.from_pretrained(base_model).to(
         device=torch.device("cuda"),
         dtype=torch.float16,
     )
@@ -81,15 +83,15 @@ def main():
 
     dpg.create_context()
     dpg.create_viewport(
-        title="StreamDiffusion img2img Test", width=2 * width, height=700
+        title="StreamDiffusion img2img Test", width=3 * width, height=700
     )
     dpg.setup_dearpygui()
 
     with dpg.value_registry():
         dpg.add_string_value(
-            default_value=f"Model: KBlueLeaf/kohaku-v2.1 (SD1.5) + LCM-LoRA\n"
+            default_value=f"Model: {base_model} (SD1.5) + LCM-LoRA\n"
             + "GPU: RTX3090\n"
-            + f"Prompt: {text_prompt} \n"
+            + f"Prompt: {prompt} \n"
             + f"Resolution: {width}*{height}",
             tag="prompt",
         )
@@ -101,16 +103,32 @@ def main():
         dpg.add_dynamic_texture(width, height, empty_data, tag=texture_tag)
         _input_width, _input_height, channels, data = dpg.load_image(path_input_image)
         dpg.add_static_texture(_input_width, _input_height, data, tag=input_tag)
+        _input_width, _input_height, channels, data = dpg.load_image(path_control_image)
+        dpg.add_static_texture(_input_width, _input_height, data, tag=control_tag)
 
     with dpg.window(
         label=f"Output Image",
+        width=width,
+        height=height,
+        pos=[2 * width, 0],
+    ):
+        with dpg.drawlist(width=width, height=height):
+            dpg.draw_image(
+                f"display_image",
+                (0, 0),
+                (width, height),
+                uv_min=(0, 0),
+                uv_max=(1, 1),
+            )
+    with dpg.window(
+        label=f"Control Image",
         width=width,
         height=height,
         pos=[width, 0],
     ):
         with dpg.drawlist(width=width, height=height):
             dpg.draw_image(
-                f"display_image",
+                control_tag,
                 (0, 0),
                 (width, height),
                 uv_min=(0, 0),
@@ -134,7 +152,7 @@ def main():
 
     with dpg.window(
         label=f"Controller",
-        width=2 * width,
+        width=3 * width,
         height=700 - 512,
         pos=[0, height],
     ):
